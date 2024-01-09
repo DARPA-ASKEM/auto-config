@@ -10,7 +10,7 @@ This file also contains other experiments and works in progress for improving th
 
 A video explaining the extraction pipeline using MITGCM as an example is below -
 
-[Demo Video](videos/extraction_demo_short.mp4)
+[Demo Video]([videos/extraction_demo_short.mp4](https://youtu.be/LLY966_iytg))
 
 
 ## Getting Started
