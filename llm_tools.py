@@ -12,12 +12,9 @@ import re
 def check_and_trim_tokens(prompt, model):
     encoding = tiktoken.get_encoding("cl100k_base")
     max_length_dict = {
-        'gpt-4': 8000,
-        'gpt-3.5-turbo-1106': 4096,
-        'gpt-4-32k-0314c': 32768,
-        'gpt-3.5-turbo-16k': 16385,
-        'gpt-4-32k-0613': 32768,
         'gpt-4-1106-preview':128000, #max tokens out is 4096
+        'gpt-3.5-turbo-1106': 4096,
+        'gpt-3.5-turbo-16k': 16385,
         "text-embedding-ada-002":8192,
     }
     max_tokens = max_length_dict[model]
@@ -76,6 +73,60 @@ def ask_gpt(prompt, model='gpt-3.5-turbo-1106',**kwargs):
     )
     return response.choices[0].message.content.strip()
 
+@retry_decorator(retry_count=3, delay_seconds=5)
+def ask_gpt_with_continue(prompt, model='gpt-4-1106-preview',**kwargs):
+    """Send a prompt to GPT and get a response.
+    
+    Example Usage:
+    Ex1:
+        prompt = '''
+            You will recieve a list of summaries of documents and a string which defines a topic of interest
+            i.e. [summary_0, summary_1, summary_2, ...] topic
+            You will respond only with in json form like:
+            {"relevant_documents": [0,2], "non_relevant_documents": [1]},
+
+            
+            Note: All or none of the documents might be relevant
+            Note: All documents should be assigned to either relevant or non-relevant
+            
+        '''
+        prompt += "The list of summaries is:" + str(summaries)
+        prompt += "The topic of interest is:" + str(topic)
+        out = ask_gpt(prompt, model='gpt-3.5-turbo-1106')   
+        
+    """
+    checked_prompt = check_and_trim_tokens(prompt, model)
+    finish_reason = 'length'
+    response = openai.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": checked_prompt}
+        ],
+        **kwargs
+    )
+    finish_reason=response.choices[0].finish_reason
+    checked_prompt=checked_prompt + response.choices[0].message.content.strip()
+    checked_prompt = check_and_trim_tokens(checked_prompt, model)
+    responses=[response.choices[0].message.content.strip()]
+    while finish_reason=='length':
+        print('Response terminated due to length. Continuing')
+        print(f'End of Message - {response.choices[0].message.content.strip()[-1000:]}')
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": checked_prompt}
+            ],
+            **kwargs
+        )
+        finish_reason=response.choices[0].finish_reason
+        responses.append(response.choices[0].message.content.strip())
+        checked_prompt=checked_prompt + response.choices[0].message.content.strip()
+        checked_prompt = check_and_trim_tokens(checked_prompt, model)
+        
+    #TODO: add code to repair json
+    return responses
 
 def parse_json_response(response):
     try:

@@ -8,7 +8,9 @@ from langchain.text_splitter import (
 )
 import os
 import time
-
+import concurrent.futures
+from extract.CodeLATS.code_lats import use_lats
+#TODO: natural language interface with docs probably necessary
 ############ SUMMARIZE DOCUMENTATION ################
 SUMMARIZE_DOCUMENTATION_DOC_PROMPT_TEMPLATE="""
 Below is the content of an article of documentation on the library {library_name}.
@@ -24,11 +26,12 @@ Begin!
 
 ############ CHOOSE DOCS TO READ FOR FINDING HOW TO RUN/WHAT CAN BE RUN  ################
 WHICH_DOC_TO_READ_RUN_PROMPT_TEMPLATE="""
-Below are the summaries of articles in the documentation of the library {library_name}.
+Below are the summaries and titles of articles in the documentation of the library {library_name}.
 You need to learn what simulations you can run and how to run them using this library from the documentation.
+{specific_request}
 You will be able to read the full documentation next.
 What are the next {n} articles you would like to read to find information on what simulations you can run and how to run them?
-Please place the articles in order of to be read first to to be read last.
+Please place the articles in order of to be read first to to be read last. Please make sure that your answer only has {n} entries.
 Please format your answer in json format as follows: 
     {{"articles":[list of article numbers]}}
 
@@ -39,12 +42,12 @@ Begin!
 """
     ##### TELL ME HOW TO RUN THIS EXPERIMENT ###############
     
-example_run_code_1_file_1='/media/hdd/Code/model_config/MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
-example_run_code_1_file_2='/media/hdd/Code/model_config/MITgcm/verification/tutorial_barotropic_gyre/input/data'
+example_run_code_1_file_1_main='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
+example_run_code_1_file_2='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/input/data'
 
-with open(example_run_code_1_file_1, 'r') as file:
+with open(example_run_code_1_file_1_main, 'r') as file:
     file_content = file.read()
-example_run_code_1_file_1=file_content
+example_run_code_1_file_1_main=file_content
 with open(example_run_code_1_file_2, 'r') as file:
     file_content = file.read()
 example_run_code_1_file_2=file_content
@@ -107,9 +110,13 @@ Here is the article:
 Begin!
 """
 
+edit_code_2="""
+Write a function which changes the {variable_print} values in the text below to user specified values - \n\n{text}"""
+
 GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT="""
 You will be given the contents of a code file called {code_file_name} which contains options for configuring a simulation and the contents of the documentation page on configuring that simulation from the library {library_name}.
 Use this information to find ALL of the parameters in the given code file which modify the simulation. Find their names, a description of each, how to modify them and possible options for the parameter.
+
 
 Please format your answer in json format as follows: 
     
@@ -117,11 +124,12 @@ Please format your answer in json format as follows:
     
     editable parameters dictionary format : {{"parameter_name":name of parameter,"description":description of parameter,"how_to_edit":how to edit the parameter,"options":the options for the parameter,"code_file":code file where the parameter can be edited including directory name}}
 
+MAKE SURE THAT ALL OF THE PARAMETERS WHICH CAN BE EDITED IN THE CODE FILE ARE INCLUDED IN YOUR ANSWER.
 
 Here is the documentation: 
 {article}
 
-Here is the code file:
+Here is the code file named {code_file_name}:
 {code}    
 
 Begin!
@@ -215,8 +223,131 @@ Here is the article:
 
 Begin!
 """
+get_config_simple_1="""Please get a list of all the configuration variables from this fortran config file. 
+Please format your answer in json format - {{'configuration_variables':[list of variables names]}} - 
+{config_text}"""
 
-def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc',code_directory='/media/hdd/Code/model_config/MITgcm'):
+get_config_simple_2_with_config="""For each of these variables create a dictionary with the variable name,
+ the type of the variable (str, int, etc..),
+ the default value of the variable (the value it is currently set at),
+ a description of the variable and a description of the options the variable could be (ex. positive integers from 1 to 10..) 
+ Please format your answer in json format - {{'configuration_variable_details':[list of dicts, with one dict for each variable in format below]}}
+ Variable dict format - {{'variable_name':the exact name of the variable as given,'type':type of the variable (str, int, etc..),'default':the default value of the variable (the value it is currently set at), 'description':a description of the variable,'options':a description of the options the variable could be (ex. positive integers from 1 to 10..)}}
+ Here is the configuration file for context - {documentation} 
+ 
+ Here are the variables - 
+ {variables}"""
+ 
+
+code_mod_prompt_4="""Write a function which changes the {variables} values in the text below to user specified values. 
+Note that the text below will ALWAYS be EXACTLY the same. 
+You can take advantage of this fact in your function. 
+Here is the function signature and doc string - 
+def answer(original_text,\n{variables}):
+#takes user supplied inputs and original text exactly in the form given and outputs text with the supplied variable values changed
+
+Here is the original text -  
+{text}"""
+
+def get_modification_functions(variables,code):
+    
+    def parallel_function(variable_slice):
+        # This is the function that will be executed in parallel
+        # Replace `modify_code_function4` with the actual function call you need
+        return use_lats(code_mod_prompt_4.format(variables=',\n'.join(variable_slice), text=code),model='gpt-3.5-turbo-1106',tree_depth=3)#'gpt-3.5-turbo-1106''gpt-4-1106-preview'
+    
+    # Number of workers equals the number of threads you want to use
+    # You can adjust this based on your system's capabilities
+    num_workers = 9  
+    
+    functions = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Creating a list of futures
+        futures = [executor.submit(parallel_function, variables[i:i+10]) for i in range(0, len(variables), 10)]
+    
+        # Retrieving and saving results as they are completed
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                # Save the result in the list
+                functions.append(result)
+                # Optionally, print the result here
+                print(result)
+            except Exception as e:
+                print(f"An error occurred: {e}")
+    return functions
+
+def use_generate_functions_to_modify_config(functions,variable_details,user_inputs,config_text):
+    """
+    
+
+    Parameters
+    ----------
+    functions : list 
+        list of functions in string format.
+    variable_details : dict
+        dict of variable names, types, maybe others...
+    user_inputs : dict
+        Dict with key value pairs of parameter names to change and values to change them to
+    config_text : str
+        config_text in string format. Must be the initial string.
+
+    Returns
+    -------
+    string.
+
+    """
+    #change names to answer1,answer2, etc..
+    #add invalid name catching or invalid type catching from what model extracted.. (variable details)
+    #eval functions so they can be used.
+    #go over functions passing config text between functions
+    for i,func in enumerate(functions):
+        valid_input_variables=func.split('def answer(')[1].split('):')[0].split(',')
+        valid_input_variables=[v.strip() for v in valid_input_variables]
+        input_subset={}
+        try:
+            for key in variable_details.keys():
+                if key in valid_input_variables:
+                    if key in user_inputs.keys():
+                        print(key)
+                        value=user_inputs[key]
+                    else:
+                        value=variable_details[key]['default']
+                    if type(value)==str:
+                        if variable_details[key]['type']=='int':
+                            input_subset[key]=int(value)
+                        elif variable_details[key]['type']=='float':
+                            input_subset[key]=float(value)
+                        elif variable_details[key]['type']=='bool':
+                            input_subset[key]=value
+                        else:
+                            input_subset[key]=value
+                    else:
+                        input_subset[key]=value
+    
+            func=func.replace('def answer(',f'def answer{i}(')
+            #remove extra code like examples, etc.. - 
+            save=False
+            lines=[]
+            for line in func.split('\n'):
+                if 'def' in line:
+                    save=True
+                if save:
+                    lines.append(line)
+                if 'return' in line:
+                    save=False
+            func='\n'.join(lines)
+            
+            exec(func,globals())
+            dynamic_func = globals()[f'answer{i}']
+            config_text=dynamic_func(config_text,**input_subset)
+        except:
+            continue
+    return config_text
+    
+
+def integrated_pipeline(docs_directory='/media/hdd/Code/auto-config/MITgcm/doc',code_directory='/media/hdd/Code/auto-config/MITgcm',library_name='MITGCM'):
     doc_files=glob.glob(docs_directory+'/**',recursive=True)
     docs_in_string_format=[]
     valid_doc_files=[]
@@ -228,7 +359,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
             valid_doc_files.append(file_path)
             
     #############   STEP 1: get summaries of documentation articles ####################
-    prompts={j: SUMMARIZE_DOCUMENTATION_DOC_PROMPT_TEMPLATE.format(library_name='MITGCM',article=doc) 
+    prompts={j: SUMMARIZE_DOCUMENTATION_DOC_PROMPT_TEMPLATE.format(library_name=library_name,article=doc) 
              for j,doc in enumerate(docs_in_string_format)}
     summarize_docs_time=time.time()
     responses=process_ask_gpt_in_parallel(prompts.values(), prompts.keys(), model='gpt-3.5-turbo-1106',max_workers=8,response_format={"type": "json_object"}) 
@@ -239,7 +370,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
     
     #############   STEP 2: WHICH DOCS TO READ  ####################
     
-    which_articles_prompt=WHICH_DOC_TO_READ_RUN_PROMPT_TEMPLATE.format(library_name='MITGCM',summaries=all_summaries,n=20)
+    which_articles_prompt=WHICH_DOC_TO_READ_RUN_PROMPT_TEMPLATE.format(library_name=library_name,summaries=all_summaries,n=20,specific_request='')
     choose_docs_time=time.time()
     out = ask_gpt(which_articles_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to choose which docs to read - ',time.time()-choose_docs_time)
@@ -250,7 +381,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
        ########   STEP 3a: GET CONFIG FILES FROM DOCS  #############
 
     example_run_doc_1=docs_in_string_format[12]
-    part12_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_12.format(library_name='MITGCM',article=example_run_doc_1)
+    part12_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_12.format(library_name=library_name,article=example_run_doc_1)
     read_doc_time=time.time()
     out = ask_gpt(part12_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get config files from docs - ',time.time()-read_doc_time)
@@ -260,13 +391,13 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
        ########   STEP 3b: GET CONFIG PARAMS FROM DOC/CODE PAIRS  #############
     # 2 examples
     
-    doc_code_prompt=GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT.format(library_name='MITGCM',code_file_name=extracted_file_names[0],article=example_run_doc_1,code=example_run_code_1_file_1) #example_run_code_1_file_1
+    doc_code_prompt=GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT.format(library_name=library_name,code_file_name=extracted_file_names[0],article=example_run_doc_1,code=example_run_code_1_file_1_main) #example_run_code_1_file_1_main
     read_doc_time=time.time()
     out = ask_gpt(doc_code_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get config params from doc/code pair - ',time.time()-read_doc_time)
     docs_code_extract_1=json.loads(out)
     
-    doc_code_prompt=GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT.format(library_name='MITGCM',code_file_name=extracted_file_names[1],article=example_run_doc_1,code=example_run_code_1_file_2) #example_run_code_1_file_2
+    doc_code_prompt=GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT.format(library_name=library_name,code_file_name=extracted_file_names[1],article=example_run_doc_1,code=example_run_code_1_file_2) #example_run_code_1_file_2
     read_doc_time=time.time()
     out = ask_gpt(doc_code_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get config params from doc/code pair - ',time.time()-read_doc_time)
@@ -274,7 +405,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
     
     #############   STEP 4: GET OUTPUT VARIABLES FROM OUTPUT FILES/DOCS  ####################
 
-    output_file_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_4.format(library_name='MITGCM',article=example_run_doc_1)
+    output_file_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_4.format(library_name=library_name,article=example_run_doc_1)
     read_doc_time=time.time()
     out = ask_gpt(output_file_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get output files from docs - ',time.time()-read_doc_time)
@@ -285,7 +416,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
     
     #############   STEP 5: GET RUN COMMANDS  ####################
     
-    run_commands_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_3.format(library_name='MITGCM',article=example_run_doc_1)
+    run_commands_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_3.format(library_name=library_name,article=example_run_doc_1)
     read_doc_time=time.time()
     out = ask_gpt(run_commands_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get run commands from docs - ',time.time()-read_doc_time)

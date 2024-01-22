@@ -8,6 +8,8 @@ from langchain.text_splitter import (
 )
 import os
 import time
+import re
+from CodeLATS.code_lats import use_lats
 #from langchain_community.document_loaders import UnstructuredMarkdownLoader
 #from langchain_community.document_loaders import UnstructuredRSTLoader
 #from langchain.text_splitter import MarkdownHeaderTextSplitter
@@ -31,7 +33,7 @@ Begin!
 """
 
 #85 docs
-docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
+docs_directory='/media/hdd/Code/auto-config/MITgcm/doc'
 doc_files=glob.glob(docs_directory+'/**',recursive=True)
 docs_in_string_format=[]
 valid_doc_files=[]
@@ -56,7 +58,6 @@ def summarize_many_docs_example():
     return all_summaries
 
 #all summaries are 42964 length total..
-#TODO: maybe gpt-4 could figure out a decent amount like which code to look at, how to run the model, etc.. from the summaries alone..
 
 ############ CHOOSE DOCS TO READ FOR FINDING HOW TO RUN/WHAT CAN BE RUN  ################
 WHICH_DOC_TO_READ_RUN_PROMPT_TEMPLATE="""
@@ -83,8 +84,8 @@ def example_which_docs_to_read(all_summaries):
     #TODO: Need to account for the case where this information is spread over multiple files and we need to carry a dict around and update it as we go
     ##### TELL ME HOW TO RUN THIS EXPERIMENT ###############
     
-example_run_code_1_file_1='/media/hdd/Code/model_config/MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
-example_run_code_1_file_2='/media/hdd/Code/model_config/MITgcm/verification/tutorial_barotropic_gyre/input/data'
+example_run_code_1_file_1='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
+example_run_code_1_file_2='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/input/data'
 example_run_doc_1=docs_in_string_format[12]
 example_run_doc_2=docs_in_string_format[2]
 with open(example_run_code_1_file_1, 'r') as file:
@@ -196,7 +197,7 @@ Begin!
 """
 
 #TODO: test does generating summary help performance?
-HOW_TO_RUN_PROMPT_TEMPLATE_part_12="""
+GET_CONFIG_FILES_FROM_DOCS_PROMPT_TEMPLATE="""
 Below is an article in the documentation of the library {library_name}.
 First determine if the article contains information on how to run a simulation.
 If the article contains information on how to run a simulation, find the names of ALL of the files which can be modified to modify the simulation.
@@ -220,11 +221,12 @@ Begin!
 """
 #adding these two together gives better output files but doesn't get all the editable parameters.
 def extract_info_example_2(example_run_doc_1):
-    part12_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_12.format(library_name='MITGCM',article=example_run_doc_1)
+    part12_prompt=GET_CONFIG_FILES_FROM_DOCS_PROMPT_TEMPLATE.format(library_name='MITGCM',article=example_run_doc_1)
     out = ask_gpt(part12_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     part12_extract=json.loads(out)
     return part12_extract
 
+#TODO: more dynamically get the documentation that would be helpful in an agent style fashion.
 GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT="""
 You will be given the contents of a code file called {code_file_name} which contains options for configuring a simulation and the contents of the documentation page on configuring that simulation from the library {library_name}.
 Use this information to find ALL of the parameters in the given code file which modify the simulation. Find their names, a description of each, how to modify them and possible options for the parameter.
@@ -244,6 +246,211 @@ Here is the code file:
 
 Begin!
 """
+
+get_config_simple_1="""Please get a list of all the configuration variables from this fortran config file. 
+Please format your answer in json format - {{'configuration_variables':[list of variables names]}} - 
+{config_text}"""
+conf_result_1=ask_gpt(get_config_simple_1.format(config_text=example_run_code_1_file_1),'gpt-3.5-turbo-1106',response_format={"type": "json_object"}) #TODO: test 3.5 on this..
+variables=json.loads(conf_result_1)['configuration_variables']
+
+get_config_simple_2="""For each of these variables create a dictionary with the variable name,
+ the type of the variable (str, int, etc..),
+ a description of the variable and a description of the options the variable could be (ex. positive integers from 1 to 10..) - 
+ {variables}""" #note this is done in the conv history of the previous one..
+get_config_simple_2_with_docs="""For each of these variables create a dictionary with the variable name,
+ the type of the variable (str, int, etc..),
+ the default value of the variable (the value it is currently set at),
+ a description of the variable and a description of the options the variable could be (ex. positive integers from 1 to 10..) 
+ Please format your answer in json format - {{'configuration_variable_details':[list of dicts, with one dict for each variable in format below]}}
+ Variable dict format - {{'variable_name':the exact name of the variable as given,'type':type of the variable (str, int, etc..),'default':the default value of the variable (the value it is currently set at), 'description':a description of the variable,'options':a description of the options the variable could be (ex. positive integers from 1 to 10..)}}
+ Here is some related documentation for context - {documentation} 
+ 
+ Here are the variables - 
+ {variables}"""  #note this is done in the conv history of the previous one..
+ 
+get_config_simple_2_with_config="""For each of these variables create a dictionary with the variable name,
+ the type of the variable (str, int, etc..),
+ the default value of the variable (the value it is currently set at),
+ a description of the variable and a description of the options the variable could be (ex. positive integers from 1 to 10..) 
+ Please format your answer in json format - {{'configuration_variable_details':[list of dicts, with one dict for each variable in format below]}}
+ Variable dict format - {{'variable_name':the exact name of the variable as given,'type':type of the variable (str, int, etc..),'default':the default value of the variable (the value it is currently set at), 'description':a description of the variable,'options':a description of the options the variable could be (ex. positive integers from 1 to 10..)}}
+ Here is the configuration file for context - {documentation} 
+ 
+ Here are the variables - 
+ {variables}"""
+ 
+#get_details_prompts={i:get_config_simple_2_with_docs.format(variables='\n'.join(variables[i:i+10]),documentation=example_run_doc_1) for i in range(0,len(variables),10)}
+get_details_prompts={i:get_config_simple_2_with_config.format(variables='\n'.join(variables[i:i+10]),documentation=example_run_code_1_file_1) for i in range(0,len(variables),10)}
+detailed_responses=process_ask_gpt_in_parallel(get_details_prompts.values(), get_details_prompts.keys(), model='gpt-3.5-turbo-1106',max_workers=8,response_format={"type": "json_object"}) 
+detailed_responses={key:json.loads(detailed_responses[key]) for key in detailed_responses.keys()}
+variable_details={}
+for key in detailed_responses.keys():
+    for d in detailed_responses[key]['configuration_variable_details']:
+        name=d['variable_name']
+        d.pop('variable_name')
+        variable_details[name]=d
+
+#TODO:try adding more to doc string..
+#TODO: maybe give a list of the types it is allowed to be and other other stuff from details..
+code_mod_prompt_4="""Write a function which changes the {variables} values in the text below to user specified values. 
+Note that the text below will ALWAYS be EXACTLY the same. 
+You can take advantage of this fact in your function. 
+Here is the function signature and doc string - 
+def answer(original_text,\n{variables}):
+#takes user supplied inputs and original text exactly in the form given and outputs text with the supplied variable values changed
+
+Here is the original text -  
+{text}"""
+
+import concurrent.futures
+def get_modification_functions(variables,code):
+    
+    def parallel_function(variable_slice):
+        # This is the function that will be executed in parallel
+        # Replace `modify_code_function4` with the actual function call you need
+        return use_lats(code_mod_prompt_4.format(variables=',\n'.join(variable_slice), text=example_run_code_1_file_1),model='gpt-3.5-turbo-1106',tree_depth=3)
+    
+    # Number of workers equals the number of threads you want to use
+    # You can adjust this based on your system's capabilities
+    num_workers = 9  
+    
+    functions = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Creating a list of futures
+        futures = [executor.submit(parallel_function, variables[i:i+10]) for i in range(0, len(variables), 10)]
+    
+        # Retrieving and saving results as they are completed
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                result = future.result()
+                # Save the result in the list
+                functions.append(result)
+                # Optionally, print the result here
+                print(result)
+            except Exception as e:
+                print(f"An error occurred: {e}")
+    return functions
+
+def use_generate_functions_to_modify_config(functions,variable_details,user_inputs,config_text):
+    """
+    
+
+    Parameters
+    ----------
+    functions : list 
+        list of functions in string format.
+    variable_details : dict
+        dict of variable names, types, maybe others...
+    user_inputs : dict
+        Dict with key value pairs of parameter names to change and values to change them to
+    config_text : str
+        config_text in string format. Must be the initial string.
+
+    Returns
+    -------
+    string.
+
+    """
+    #change names to answer1,answer2, etc..
+    #add invalid name catching or invalid type catching from what model extracted.. (variable details)
+    #eval functions so they can be used.
+    #go over functions passing config text between functions
+    for i,func in enumerate(functions):
+        valid_input_variables=func.split('def answer(')[1].split('):')[0].split(',')
+        valid_input_variables=[v.strip() for v in valid_input_variables]
+        input_subset={}
+        for key in variable_details.keys():
+            if key in valid_input_variables:
+                if key in user_inputs.keys():
+                    print(key)
+                    value=user_inputs[key]
+                else:
+                    value=variable_details[key]['default']
+                if variable_details[key]['type']=='int':
+                    input_subset[key]=int(value)
+                elif variable_details[key]['type']=='float':
+                    input_subset[key]=float(value)
+                elif variable_details[key]['type']=='bool':
+                    input_subset[key]=value
+                else:
+                    input_subset[key]=value
+
+        func=func.replace('def answer(',f'def answer{i}(')
+        exec(func,globals())
+        dynamic_func = globals()[f'answer{i}']
+        config_text=dynamic_func(config_text,**input_subset)
+    return config_text
+    
+
+
+HOW_TO_COMPILE_PROMPT_TEMPLATE_part_3="""
+Below is an article in the documentation of the library {library_name}.
+First generate a summary of the article.
+Then determine if the article contains information on how to compile a simulation.
+If the article contains information on how to compile a simulation, determine how the model can be compiled.
+Please format your answer in json format as follows: 
+
+    {{"summary":summary of the article,
+      "is_simulation_article":True/False (True is the article contains information on how to run a simulation, false otherwise),
+      "compilation_instructions":[list of commands to be run to run the model, in order],
+      "compilation_simulation_description":a natural language description of how to compile the model}}
+
+    Note: If there is no information on how to compile the simulation then the keys compilation_instructions,compilation_simulation_description are not to be used.
+
+
+Here is the article: 
+{article}
+
+Begin!
+"""
+library_name='WRF'
+compilation_commands_prompt=HOW_TO_COMPILE_PROMPT_TEMPLATE_part_3.format(library_name=library_name,article=example_run_doc_1)
+read_doc_time=time.time()
+compile_out = ask_gpt(compilation_commands_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
+print('Took this much time to get run commands from docs - ',time.time()-read_doc_time)
+
+
+GET_CONFIG_PARAMS_MORE_EDITING_FROM_DOCS_AND_CODE_PROMPT="""
+You will be given the contents of a code file called {code_file_name} which contains options for configuring a simulation and the contents of the documentation page on configuring that simulation from the library {library_name}.
+The lines of the code file will be numbered.
+Use this information to find ALL of the parameters in the given code file which modify the simulation. Find their names, a description of each, how to modify them and possible options for the parameter.
+
+Please format your answer in json format as follows: 
+
+    {{""editable_parameters":[list of dictionaries on parameters which can be modified, see below for editable parameters dictionary format]}}
+
+    editable parameters dictionary format : {{"parameter_name":name of parameter,"description":description of parameter,"line_number":line number on which the parameter has a value assigned to it, "substring":the substring in the line which contains the parameter value, ex. in sx = 24 substring is 24,"type":type of the parameter}}
+
+
+Here is the documentation: 
+{article}
+
+Here is the code file:
+{code}    
+
+Begin!
+"""
+#TODO: maybe give a list of the types it is allowed to be??
+
+
+#example edit code output - 
+# import re
+
+# def edit_parameter_function(file_content, new_sNx):
+#     # Check if new_sNx is a valid value (integer greater than 0)
+#     if not isinstance(new_sNx, int) or new_sNx <= 0:
+#         raise ValueError(f'Invalid sNx value: {new_sNx}. It must be an integer greater than 0.')
+
+#     # Regular expression pattern to find and replace the sNx parameter value
+#     sNx_pattern = re.compile(r'(sNx =)\n? +[0-9]+')
+
+#     # Perform the substitution
+#     new_file_content = sNx_pattern.sub(r'\1 ' + str(new_sNx), file_content)
+
+#     return new_file_content
+# new_file=edit_parameter_function(example_run_code_1_file_1,10)
+# print(new_file)
 
 
 GET_OUTPUT_PARAMS_FROM_DOCS_AND_FILE_PROMPT="""
@@ -280,6 +487,282 @@ def get_info_from_doc_pairs_example(example_run_doc_1,example_run_code_1_file_2)
     docs_code_extract=json.loads(out)
     return docs_code_extract
 
+EDIT_CODE_GIVEN_PARAM_PROMPT="""
+You will be given the contents of a code file called {code_file_name} which contains the parameter {option} (among other parameters) for configuring a simulation from the library {library_name}.
+Please write a short python function which can take the string content of the file below and change the parameter to a valid value.
+Please include a detailed doc string and include types for the inputs.
+Please also write a test for the function
+
+Please format your answer in json format as follows: 
+
+    {{""python code":python  markdown containing code with edit_parameter_function,
+      "test":python markdown containing code including test}}
+
+Here is the code: 
+
+{code}
+ 
+"""
+#DONE: try LATS - https://github.com/andyz245/LanguageAgentTreeSearch/tree/main?tab=readme-ov-file https://huggingface.co/spaces/AIatUIUC/CodeLATS 
+#TODO: maybe RLTF (rl from unit test feedback) - https://github.com/Zyq-scut/RLTF
+edit_code_2="""
+Write a function which changes the {variable_print} values in the text below to user specified values - \n\n{text}"""
+
+edit_code_3="""Write a function which changes the {variable_print} values in the text below to user specified values. Note that the text below will ALWAYS be EXACTLY the same. You can take advantage of this fact in your function. - \n\n{text}"""
+
+EDIT_CODE_GIVEN_PARAM_PROMPT="""
+You will be given the contents of a code file called {code_file_name} which contains the parameter {option} (among other parameters) for configuring a simulation from the library {library_name} which is written in fortran.
+Please write a short python function named edit_parameters which can take the string content of the file below and change the parameter to a valid value.
+Please include a detailed doc string and include types for the inputs.
+Please format your answer in json format as follows: 
+
+    {{""python code":str of python code containing only the code for edit_parameters}}
+
+Here is the code: 
+
+{code}
+
+"""
+
+try2="""Write a function which changes the any of editable parameters in the text below to user specified values. Include a description of each variable in the doc string - 
+
+ &time_control
+ run_days                            = 5,
+ run_hours                           = 0,
+ run_minutes                         = 0,
+ run_seconds                         = 0,
+ start_year                          = 0001, 0001, 0001,
+ start_month                         = 01,   01,   01,
+ start_day                           = 01,   01,   01,
+ start_hour                          = 00,   00,   00,
+ start_minute                        = 00,   00,   00,
+ start_second                        = 00,   00,   00,
+ end_year                            = 0001, 0001, 0001,
+ end_month                           = 01,   01,   01,
+ end_day                             = 05,   05,   05,
+ end_hour                            = 00,   00,   00,
+ end_minute                          = 00,   00,   00,
+ end_second                          = 00,   00,   00,
+ history_interval                    = 360,  360,  360,
+ frames_per_outfile                  = 1000, 1000, 1000,
+ restart                             = .false.,
+ restart_interval                    = 3600,
+ io_form_history                     = 2
+ io_form_restart                     = 2
+ io_form_input                       = 2
+ io_form_boundary                    = 2
+ /
+
+ &domains
+ time_step                           = 600,
+ time_step_fract_num                 = 0,
+ time_step_fract_den                 = 1,
+ max_dom                             = 1,
+ s_we                                = 1,     1,     1,
+ e_we                                = 41,    41,    41,
+ s_sn                                = 1,     1,     1,
+ e_sn                                = 81,    81,    81,
+ s_vert                              = 1,     1,     1,
+ e_vert                              = 65,    65,    65,
+ dx                                  = 100000,
+ dy                                  = 100000,
+ ztop                                = 16000, 16000, 16000,
+ grid_id                             = 1,     2,     3,
+ parent_id                           = 0,     1,     2,
+ i_parent_start                      = 0,     17,    17,
+ j_parent_start                      = 0,     33,    33,
+ parent_grid_ratio                   = 1,     5,     5,
+ parent_time_step_ratio              = 1,     5,     5,
+ feedback                            = 1,
+ smooth_option                       = 0
+ /
+
+ &physics
+ mp_physics                          = 0,     0,     0,
+ ra_lw_physics                       = 0,     0,     0,
+ ra_sw_physics                       = 0,     0,     0,
+ radt                                = 30,    30,    30,
+ sf_sfclay_physics                   = 0,     0,     0,
+ sf_surface_physics                  = 0,     0,     0,
+ bl_pbl_physics                      = 0,     0,     0,
+ bldt                                = 0,     0,     0,
+ cu_physics                          = 0,     0,     0,
+ cudt                                = 5,     5,     5,
+ /
+
+ &fdda
+ /
+
+ &dynamics
+ hybrid_opt                          = 0, 
+ rk_ord                              = 3,
+ diff_opt                            = 1,      1,      1,
+ km_opt                              = 1,      1,      1,
+ damp_opt                            = 0,
+ zdamp                               = 4000.,  4000.,  4000.,
+ dampcoef                            = 0.01,   0.01,   0.01
+ khdif                               = 0,      0,      0,
+ kvdif                               = 0,      0,      0,
+ smdiv                               = 0.1,    0.1,    0.1,
+ emdiv                               = 0.01,   0.01,   0.01,
+ epssm                               = 0.1,    0.1,    0.1
+ time_step_sound                     = 4,      4,      4,
+ h_mom_adv_order                     = 5,      5,      5,
+ v_mom_adv_order                     = 3,      3,      3,
+ h_sca_adv_order                     = 5,      5,      5,
+ v_sca_adv_order                     = 3,      3,      3,
+ non_hydrostatic                     = .true., .true., .true.,
+ /
+
+ &bdy_control
+ periodic_x                          = .true., 
+ symmetric_xs                        = .false.,
+ symmetric_xe                        = .false.,
+ open_xs                             = .false.,
+ open_xe                             = .false.,
+ periodic_y                          = .false.,
+ symmetric_ys                        = .true., 
+ symmetric_ye                        = .true., 
+ open_ys                             = .false.,
+ open_ye                             = .false.,
+ /
+
+ &grib2
+ /
+
+ &namelist_quilt
+ nio_tasks_per_group = 0,
+ nio_groups = 1,
+ /
+
+ &ideal
+ ideal_case = 7
+ /"""
+ 
+def code_edit_experiments():
+    #TODO: ask for example usage or unittests, ask for certain things in doc string, etc.. etc..
+    edit_prompt=EDIT_CODE_GIVEN_PARAM_PROMPT.format(library_name='MITGCM',code_file_name=extracted_file_names[0],article=example_run_doc_1,code=example_run_code_1_file_1,option='sNx')
+    out = ask_gpt(edit_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
+    edit_code=json.loads(out)
+    print(edit_code['python code'])
+    print(edit_code['test'])
+    import openai
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": edit_prompt}
+    ]
+    response = openai.chat.completions.create(
+        model='gpt-4-1106-preview',
+        messages=messages,
+        response_format={"type": "json_object"}
+    )
+    message=response.choices[0].message
+    out = response.choices[0].message.content.strip()
+    code=json.loads(out)['python code']
+    test=json.loads(out)['test']
+    parsed_code=json.loads(out)['python code'].split("```")[1].replace("python",'').strip()
+    parsed_test=json.loads(out)['test'].split("```")[1].replace("python",'').strip()
+    print(parsed_code)
+    print(parsed_test)
+    
+    import re
+    function_pattern = r'(def\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\):\s*[\s\S]*?)(?=(?:\s*def|$))'
+    function_matches = re.finditer(function_pattern, parsed_code)
+    functions=[]
+    for i,match in enumerate(function_matches):
+        function_code = match.group(1).strip()
+        functions.append(function_code)
+    functions.append(function_code)
+    
+    messages.append(message)
+    messages.append({"role": "user", "content": 'I tried running the test and your code and got an assertion error, fix the code.'})
+    
+
+#TODO: write code to verify and debug
+DEBUG_EDIT_CODE="""
+NOW TEST 
+"""
+#line by line version WM style:
+
+test_string='CBOP\nC    !ROUTINE: SIZE.h\nC    !INTERFACE:\nC    include SIZE.h\nC    !DESCRIPTION: \\bv\nC     *==========================================================*\nC     | SIZE.h Declare size of underlying computational grid.\nC     *==========================================================*\nC     | The design here supports a three-dimensional model grid\nC     | with indices I,J and K. The three-dimensional domain\nC     | is comprised of nPx*nSx blocks (or tiles) of size sNx\nC     | along the first (left-most index) axis, nPy*nSy blocks\nC     | of size sNy along the second axis and one block of size\nC     | Nr along the vertical (third) axis.\nC     | Blocks/tiles have overlap regions of size OLx and OLy\nC     | along the dimensions that are subdivided.\nC     *==========================================================*\nC     \\ev\nC\nC     Voodoo numbers controlling data layout:\nC     sNx :: Number of X points in tile.\nC     sNy :: Number of Y points in tile.\nC     OLx :: Tile overlap extent in X.\nC     OLy :: Tile overlap extent in Y.\nC     nSx :: Number of tiles per process in X.\nC     nSy :: Number of tiles per process in Y.\nC     nPx :: Number of processes to use in X.\nC     nPy :: Number of processes to use in Y.\nC     Nx  :: Number of points in X for the full domain.\nC     Ny  :: Number of points in Y for the full domain.\nC     Nr  :: Number of points in vertical direction.\nCEOP\n      INTEGER sNx\n      INTEGER sNy\n      INTEGER OLx\n      INTEGER OLy\n      INTEGER nSx\n      INTEGER nSy\n      INTEGER nPx\n      INTEGER nPy\n      INTEGER Nx\n      INTEGER Ny\n      INTEGER Nr\n      PARAMETER (\n     &           sNx =  62,\n     &           sNy =  62,\n     &           OLx =   2,\n     &           OLy =   2,\n     &           nSx =   1,\n     &           nSy =   1,\n     &           nPx =   1,\n     &           nPy =   1,\n     &           Nx  = sNx*nSx*nPx,\n     &           Ny  = sNy*nSy*nPy,\n     &           Nr  =   1)\n\nC     MAX_OLX :: Set to the maximum overlap region size of any array\nC     MAX_OLY    that will be exchanged. Controls the sizing of exch\nC                routine buffers.\n      INTEGER MAX_OLX\n      INTEGER MAX_OLY\n      PARAMETER ( MAX_OLX = OLx,\n     &            MAX_OLY = OLy )\n\n'
+print_out='\n'.join([f'{i}:{text}' for i,text in enumerate(test_string.split('\n'))])
+first_query="""
+In the string below, which lines have config parameter value assignments on them?
+Format your answer in json format as a dictionary of parameter name: line number pairs
+{config_string}
+"""
+first_query="""
+In the string below, which lines have config parameter value assignments on them?
+For each of those lines determine the smallest substring that must be edited to change the value.
+Format your answer in json format as a dictionary of {{'parameter name': {{'line_number':line_number,'substring':substring}}}}
+{config_string}"""
+out = ask_gpt(first_query.format(config_string=print_out), model='gpt-4-1106-preview',response_format={"type": "json_object"})
+config_options=json.loads(out)
+second_queries="""
+If I want to edit the value of {parameter} in this string which of the following should I edit?
+Please submit you answer in json format as follows: {{'choice':choice}}
+string: {string_line}
+choices:{choices}
+"""
+second_queries="""
+If I want to edit the value of {parameter} in this string which substring should I replace?
+Please submit you answer in json format as follows: {{'substring':substring}}
+string: {substring}
+"""
+edit_lines_prompts={}
+out=json.loads(out)
+test_string_lines=test_string.split('\n')
+list_of_parameters=["sNx", "sNy", "OLx", "OLy", "nSx", "nSy", "nPx", "nPy", "Nr"]
+for i,key in enumerate(out):
+    line=test_string_lines[out[key]]
+    edit_lines_prompts[key]=second_queries.format(**{'parameter':key,'substring':line})
+#'gpt-3.5-turbo-1106' 'gpt-4-1106-preview'
+responses=process_ask_gpt_in_parallel(edit_lines_prompts.values(), edit_lines_prompts.keys(), model='gpt-3.5-turbo-1106',max_workers=8,response_format={"type": "json_object"}) 
+responses={key:json.loads(responses[key]) for key in responses.keys()}
+config_options={}
+for key in responses.keys():
+    config_options[key]={'substring':responses[key]['substring'],'line_number':out[key]}
+#or use some sort of comprehension..
+#TODO: add options for different types of formats
+
+#take integer, float, etc.. and convert to python types..
+# def convert_type(config_options_dict):
+#     for key in config_options_dict.keys():
+#         option_type=config_options_dict[key]['type']
+#         if 
+
+#TODO: write code that takes file type information and function below to take user input and format it properly for file
+#TODO: take convert_type, edit_lines and new formatting function. Take run command code and then create demo out of it. Maybe with streamlit app.
+def edit_lines(config_string,config_options,user_parameters):
+    """
+    config_string is your config file in string format
+    config options is a  dict that contain parameter_name keys and sub dicts with line_number, substring keys
+    user_parameters is a dict of parameter value pairs
+    """
+    config_string_lines=config_string.split('\n')
+    new_lines=[]
+    for i,line in enumerate(config_string_lines):
+        new_line=line
+        for parameter in user_parameters:
+            if parameter in list(config_options.keys()):
+                if i == config_options[parameter]['line_number']:
+                    pattern = r'\d+'
+    
+                    # Use re.search to find the numerical value in the string
+                    match = re.search(pattern, new_line)
+    
+                    if match:
+                        numerical_value = match.group()  # Convert the matched value to an integer
+                        new_substring=config_options[parameter]['substring'].replace(numerical_value,str(user_parameters[parameter]))
+                        new_line=new_line.replace(config_options[parameter]['substring'],new_substring)
+                    else:
+                        print("No numerical value found in the string.")
+                        continue
+                        
+        new_lines.append(new_line)
+            
+    new_config_string='\n'.join(new_lines)
+    return new_config_string
 #TODO: test does generating summary help performance?
 
 HOW_TO_RUN_PROMPT_TEMPLATE_part_3="""
@@ -387,7 +870,7 @@ WHICH_DOC_TO_READ_CONFIG_PROMPT_TEMPLATE="""
 Below are the summaries of articles in the documentation of the library {library_name}.
 You need to extract configuration variables which can be edited in using this library from the documentation.
 You will be able to read the full documentation next.
-What are the next 10 articles you would like to read to find configuration variables?
+What are the next {n} articles you would like to read to find configuration variables?
 Please place the articles in order of to be read first to to be read last.
 Please format your answer in json format as follows: 
     {{"articles":[list of article numbers]}}
@@ -398,7 +881,7 @@ Here are the summaries:
 Begin!
 """
 def which_docs_to_read_example(all_summaries):
-    which_articles_prompt=WHICH_DOC_TO_READ_CONFIG_PROMPT_TEMPLATE.format(library_name='MITGCM',summaries=all_summaries)
+    which_articles_prompt=WHICH_DOC_TO_READ_CONFIG_PROMPT_TEMPLATE.format(library_name='MITGCM',summaries=all_summaries,n=10)
     out = ask_gpt(which_articles_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     articles_to_read=json.loads(out)['articles']
     return articles_to_read
@@ -515,9 +998,9 @@ Begin!
 """
 
 #get code file content
-code_directories=['/media/hdd/Code/model_config/MITgcm/verification/exp2/code',
-                  '/media/hdd/Code/model_config/MITgcm/verification/exp2/input',
-                  '/media/hdd/Code/model_config/MITgcm/verification/exp2/input.rigidLid']
+code_directories=['/media/hdd/Code/auto-config/MITgcm/verification/exp2/code',
+                  '/media/hdd/Code/auto-config/MITgcm/verification/exp2/input',
+                  '/media/hdd/Code/auto-config/MITgcm/verification/exp2/input.rigidLid']
 unallowable_formats=['.bin']
 code_in_string_format=[]
 relevant_code_files=[]
@@ -827,7 +1310,7 @@ def change_option(name,line_content,new_option,code_file_content):
 #TODO: right now integrated pipeline uses subset of operations for demo purposes, to use for real, expand from single example to parallel calls over whole list/step 3 tasks (given gpt-4 rate limits)
 
 
-def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc',code_directory='/media/hdd/Code/model_config/MITgcm'):
+def integrated_pipeline(docs_directory='/media/hdd/Code/auto-config/MITgcm/doc',code_directory='/media/hdd/Code/auto-config/MITgcm'):
     doc_files=glob.glob(docs_directory+'/**',recursive=True)
     docs_in_string_format=[]
     valid_doc_files=[]
@@ -861,7 +1344,7 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/model_config/MITgcm/doc'
        ########   STEP 3a: GET CONFIG FILES FROM DOCS  #############
        
     example_run_doc_1=docs_in_string_format[12]
-    part12_prompt=HOW_TO_RUN_PROMPT_TEMPLATE_part_12.format(library_name='MITGCM',article=example_run_doc_1)
+    part12_prompt=GET_CONFIG_FILES_FROM_DOCS_PROMPT_TEMPLATE.format(library_name='MITGCM',article=example_run_doc_1)
     read_doc_time=time.time()
     out = ask_gpt(part12_prompt, model='gpt-4-1106-preview',response_format={"type": "json_object"})
     print('Took this much time to get config files from docs - ',time.time()-read_doc_time)
