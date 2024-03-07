@@ -41,16 +41,6 @@ Here are the summaries:
 Begin!
 """
     ##### TELL ME HOW TO RUN THIS EXPERIMENT ###############
-    
-example_run_code_1_file_1_main='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
-example_run_code_1_file_2='/media/hdd/Code/auto-config/MITgcm/verification/tutorial_barotropic_gyre/input/data'
-
-with open(example_run_code_1_file_1_main, 'r') as file:
-    file_content = file.read()
-example_run_code_1_file_1_main=file_content
-with open(example_run_code_1_file_2, 'r') as file:
-    file_content = file.read()
-example_run_code_1_file_2=file_content
 
 HOW_TO_RUN_PROMPT_TEMPLATE="""
 Below is an article in the documentation of the library {library_name}.
@@ -251,28 +241,20 @@ Here is the original text -
 
 def get_modification_functions(variables,code):
     
-    def parallel_function(variable_slice):
-        # This is the function that will be executed in parallel
-        # Replace `modify_code_function4` with the actual function call you need
+    def use_lats_parallel(variable_slice):
         return use_lats(code_mod_prompt_4.format(variables=',\n'.join(variable_slice), text=code),model='gpt-3.5-turbo-1106',tree_depth=3)#'gpt-3.5-turbo-1106''gpt-4-1106-preview'
-    
-    # Number of workers equals the number of threads you want to use
-    # You can adjust this based on your system's capabilities
     num_workers = 9  
     
     functions = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Creating a list of futures
-        futures = [executor.submit(parallel_function, variables[i:i+10]) for i in range(0, len(variables), 10)]
+        futures = [executor.submit(use_lats_parallel, variables[i:i+10]) for i in range(0, len(variables), 10)]
     
-        # Retrieving and saving results as they are completed
         for future in concurrent.futures.as_completed(futures):
             try:
                 result = future.result()
                 # Save the result in the list
                 functions.append(result)
-                # Optionally, print the result here
                 print(result)
             except Exception as e:
                 print(f"An error occurred: {e}")
@@ -390,6 +372,15 @@ def integrated_pipeline(docs_directory='/media/hdd/Code/auto-config/MITgcm/doc',
     
        ########   STEP 3b: GET CONFIG PARAMS FROM DOC/CODE PAIRS  #############
     # 2 examples
+    example_run_code_1_file_1_main='MITgcm/verification/tutorial_barotropic_gyre/code/SIZE.h'
+    example_run_code_1_file_2='MITgcm/verification/tutorial_barotropic_gyre/input/data'
+    
+    with open(example_run_code_1_file_1_main, 'r') as file:
+        file_content = file.read()
+    example_run_code_1_file_1_main=file_content
+    with open(example_run_code_1_file_2, 'r') as file:
+        file_content = file.read()
+    example_run_code_1_file_2=file_content
     
     doc_code_prompt=GET_CONFIG_PARAMS_FROM_DOCS_AND_CODE_PROMPT.format(library_name=library_name,code_file_name=extracted_file_names[0],article=example_run_doc_1,code=example_run_code_1_file_1_main) #example_run_code_1_file_1_main
     read_doc_time=time.time()
